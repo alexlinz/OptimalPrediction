@@ -1,65 +1,17 @@
----
-title: "Optimal Prediction Workflow, CHTC edition"
-author: "Alex Linz"
-date: "May 1, 2018"
-output: html_document
----
-
 # 16S Best Practices
 Please cite xxx
 
+##Instructions
 
-## Fast Run Instructions
+The goal of this analysis is to use all available data from the Trout Bog epilimnion to test different parameters and programs for 16S analysis and develop a list of "best practices." Because of the large number of iterations needed to test several parameters in combination, we will be running as much as we can on a high-throughput computing system.
 
-Appropriate uses of the fast run instructions:
- - I don't care about parameters, I just want to see if your code works
- - I've already run this 30 times and my advisor wants just one more change
- - Give me the really short version of what you're doing
+UW-Madison's CHTC runs on condor. The files in submits/ set up your jobs by grabbing one fastq file (indicated by a text file) and runs the corresponding executable/ file on an "execute node," a free computer hooked up to CHTC's systems. This means that all of our fastq files can run concurrently, drastically reducing time to results. If you do not have access to a high-throughput computing system, the scripts in executables/ will still work on single fastq files. 
 
-Inappropriate uses:
- - Reading this for your first pass through instead of the very detailed tutorial below
- - Running this code on data that is not identical to the published dataset
- - Anything that needs parameters tweaked or visual inspection of quality data
-
-```{bash, eval = F}
-# From the folder 16S_best_practices on a CHTC submit node:
-# Install python, qiime, and ea-utils (for read joining)
-condor_submit -i submits/install_qiime.sub
-
-# List UW sequenced samples that need to be processed
-./scripts/list_uw_samples.sh
-
-# QC UW samples to the same level as the EMP samples
-condor_submit submits/00uwbcquality_control.sub
-
-# Check for the results files
-ls -ltrh /mnt/gluster/amlinz/NTL-MO/UW-processed/
-
-# Make a list of all fastq and trimming length combinations to run
-# Need a list of the EMP samples too
-./scripts/list_EMP_samples.sh
-./scripts/setup_trimming.sh
-
-# Submit trimming scripts - can run concurrently
-condor_submit submits 01trim_uwbc_seqs.sub
-condor_submit submits 02trim_emp_seqs.sub
-
-# Check the results files
-ls -ltrh /mnt/gluster/amlinz/NTL-MO/trimmed_100/
-ls -ltrh /mnt/gluster/amlinz/NTL-MO/trimmed_130/
-
-# Make tar archives
-
-
-```
-
-##Full Instructions
-
-The goal of this analysis is to use all available data from the Trout Bog epilimnion to test different parameters and programs for 16S analysis and develop a list of "best practices." Because of the large number of iterations needed to test several parameters in combination, we will be running this on a high-throughput computing system.
+QIIME2 
  
  0. Installations
  
- QIIME2 will be accessed using a docker image. QIIME1 can be installed in an interactive build session as below.
+QIIME1 can be installed in an interactive build session as below.
  
 ```{bash, eval = F}
 # Built on Scientific Linux 6.6 (Carbon)
@@ -535,29 +487,5 @@ trimmed_130+deblur
 trimmed_130+denoise
 trimmed_130+nothing
 
-00error_correction.sh:
-```{bash, eval = F}
-#!/bin/bash
 
-./run_qiime.sh
-
-#Split variables
-echo $1 > variables.txt
-location=$(awk -F'+' '{print $1}' variables.txt)
-method=$(awk -F'+' '{print $2}' variables.txt)
-
-# Copy data
-cp /mnt/gluster/amlinz/NTL-MO/$location .
-
-# Import data as a QIIME artifact
-qiime tools import \
-  --type 'SampleData[SequencesWithQuality]' \
-  --input-path $location \
-  --source-format CasavaOneEightSingleLanePerSampleDirFmt \
-  --output-path $1.qza
-
-rmdir -r $location
-
-
-```
  
