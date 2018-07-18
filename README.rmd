@@ -1,0 +1,19 @@
+# Optimal prediction of 16S Data
+
+description
+link to OSF data?
+
+## Repository structure
+
+- README: this file
+- Code
+  - Run_instructions.Rmd: more detailed information on what the scripts do and how to use them
+  - CHTC_scripts: code to run QIIME1 in a high-throughput computing environment
+    - submits/ : .sub files that grab an executable and tell condor how many jobs to run
+    - executables/ : run QIIME1 commands
+    - scripts/ : move files and make lists of files to run on the submit node
+  - miniconda_scripts: code to run QIIME2 in Miniconda
+  
+  
+    
+ 
