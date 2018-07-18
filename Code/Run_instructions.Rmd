@@ -1,0 +1,563 @@
+---
+title: "Optimal Prediction Workflow, CHTC edition"
+author: "Alex Linz"
+date: "May 1, 2018"
+output: html_document
+---
+
+# 16S Best Practices
+Please cite xxx
+
+
+## Fast Run Instructions
+
+Appropriate uses of the fast run instructions:
+ - I don't care about parameters, I just want to see if your code works
+ - I've already run this 30 times and my advisor wants just one more change
+ - Give me the really short version of what you're doing
+
+Inappropriate uses:
+ - Reading this for your first pass through instead of the very detailed tutorial below
+ - Running this code on data that is not identical to the published dataset
+ - Anything that needs parameters tweaked or visual inspection of quality data
+
+```{bash, eval = F}
+# From the folder 16S_best_practices on a CHTC submit node:
+# Install python, qiime, and ea-utils (for read joining)
+condor_submit -i submits/install_qiime.sub
+
+# List UW sequenced samples that need to be processed
+./scripts/list_uw_samples.sh
+
+# QC UW samples to the same level as the EMP samples
+condor_submit submits/00uwbcquality_control.sub
+
+# Check for the results files
+ls -ltrh /mnt/gluster/amlinz/NTL-MO/UW-processed/
+
+# Make a list of all fastq and trimming length combinations to run
+# Need a list of the EMP samples too
+./scripts/list_EMP_samples.sh
+./scripts/setup_trimming.sh
+
+# Submit trimming scripts - can run concurrently
+condor_submit submits 01trim_uwbc_seqs.sub
+condor_submit submits 02trim_emp_seqs.sub
+
+# Check the results files
+ls -ltrh /mnt/gluster/amlinz/NTL-MO/trimmed_100/
+ls -ltrh /mnt/gluster/amlinz/NTL-MO/trimmed_130/
+
+# Make tar archives
+
+
+```
+
+##Full Instructions
+
+The goal of this analysis is to use all available data from the Trout Bog epilimnion to test different parameters and programs for 16S analysis and develop a list of "best practices." Because of the large number of iterations needed to test several parameters in combination, we will be running this on a high-throughput computing system.
+ 
+ 0. Installations
+ 
+ QIIME2 will be accessed using a docker image. QIIME1 can be installed in an interactive build session as below.
+ 
+```{bash, eval = F}
+# Built on Scientific Linux 6.6 (Carbon)
+
+tar xvzf ExpressionAnalysis-ea-utils-1.04.807-18-gbd148d4.tar.gz
+wget ftp://ftp.gnu.org/gnu/gsl/gsl-2.4.tar.gz
+tar xvzf gsl-2.4.tar.gz
+mkdir home/
+cd gsl-2.4
+./configure --prefix=$(pwd)/../home/gsl
+make
+
+# There's a bug where one of the test fails but only in this particular operating system. Developers say it is not an actual issues and recommend commenting out that line in specfunc/test_bessel.c:
+# 186   TEST_SF(s,  gsl_sf_bessel_j2_e, (1048576.0, &r), -3.1518539455252413111e-07, TEST_TOL3, GSL_SUCCESS); 
+# Comment in c by surrounding line with /* stuff */
+make check
+make install
+cd ..
+export PATH=$(pwd)/home/gsl/:$PATH
+
+# Finish ea-utils install
+cd  ExpressionAnalysis-ea-utils-bd148d4/clipper
+PREFIX=$(pwd)/../../home/ make install
+cd ../..
+
+tar cvzf ea-utils.tar.gz home/ 
+
+# Install Python. Must be version greater than 2.7 and less than 3
+
+mkdir python
+tar -xvf Python-2.7.13.tgz
+cd Python-2.7.13
+./configure --prefix=$(pwd)/../python
+make
+make install
+cd ..
+ls python
+ls python/bin
+export PATH=$(pwd)/python/bin:$PATH
+
+# Install pip, which installs things. Meta.
+wget https://bootstrap.pypa.io/get-pip.py
+python get-pip.py
+
+# Downgrade setuptools.py. The current version fights with qiime
+pip install setuptools==36.5.0
+
+# Install desired packages. pip will attempt to install non-Python qiime dependencies, but if it doesn't, install separately
+pip install numpy
+pip install qiime
+
+# Test the install
+print_qiime_config.py -t
+
+# Package up the version of python with qiime installed
+
+tar cvzf qiime1.tar.gz python/
+
+# Remove extra files
+rm -rf python/
+rm -r home/
+rm -rf gsl-2.4
+rm -r ExpressionAnalysis-ea-utils-bd148d4
+rm ExpressionAnalysis-ea-utils-1.04.807-18-gbd148d4.tar.gz 
+rm get-pip.py
+rm Python-2.7.13.tgz
+rm -r Python-2.7.13/
+rm gsl-2.4.tar.gz
+
+```
+Start the interactive session using the following command:
+```{bash, eval = F}
+condor_submit -i submits/install_qiime.sub
+```
+
+install_qiime.sub:
+```{bash, eval = F}
+#install_qiime.sub
+#
+universe = vanilla
+# Name the log file:
+log = install_qiime.log
+
+# Name the files where standard output and error should be saved:
+output = process.out
+error = process.err
+
+# If you wish to compile code, you'll need the below lines.
+#  Otherwise, LEAVE THEM OUT if you just want to interactively test!
++IsBuildJob = true
+requirements = ( IsBuildSlot == true ) && (OpSysMajorVer =?= 6)
+
+# Indicate all files that need to go into the interactive job session,
+#  including any tar files that you prepared:
+transfer_input_files = Python-2.7.13.tgz,ExpressionAnalysis-ea-utils-1.04.807-18-gbd148d4.tar.gz
+transfer_output_files = qiime1.tar.gz,ea-utils.tar.gz
+
+# It's still important to request enough computing resources. The below
+#  values are a good starting point, but consider your file sizes for an
+#  estimate of "disk" and use any other information you might have
+#  for "memory" and/or "cpus".
+
+request_cpus = 1
+request_memory = 8GB
+request_disk = 2GB
+
+queue
+
+```
+The QIIME1 tarball can now be unzipped and run in any Linux 6 or 7 environment.
+
+1. Basic quality control on the UWBC sequences
+
+The "rawest" version of the EMP sequences has already been processed a bit. Combine paired reads in the new UW data and bring it up to speed. This script has no parameters to tweak and therefore, only needs to run once. Since it acts on samples independently, each pair of forward and reverse reads can run on its own execute node. List the samples, submit the jobs, and check the results:
+
+```{bash, eval = F}
+./scripts/list_UW_samples.sh
+
+# QC UW samples to the same level as the EMP samples
+condor_submit submits/00uwbcquality_control.sub
+
+# Check for the results files
+ls -ltrh /mnt/gluster/amlinz/NTL-MO/UW-processed/
+```
+
+list_uw_samples.sh
+```{bash, eval = F}
+
+#!/bin/bash
+
+#mkdir /mnt/gluster/amlinz/NTL-MO/UW-processed/
+for file in /mnt/gluster/amlinz/NTL-MO/UW/*R1_001.fastq.gz; do
+        sample=$(basename $file R1_001.fastq.gz);
+        echo $sample;
+        done > uwbc_samples.txt
+```
+
+
+00uwbc_qualitycontrol.sub
+```{bash, eval = F}
+# 00uwbc_qualitycontrol.sub
+#
+#
+# Specify the HTCondor Universe
+universe = vanilla
+log = 00uwbc_qualitycontrol_$(Cluster).log
+error = 00uwbc_qualitycontrol_$(Cluster)_$(Process).err
+requirements = (OpSys == "LINUX") && (OpSysMajorVer == 7) && (Target.HasGluster == true)
+#
+# Specify your executable, arguments, and a file for HTCondor to store standard
+#  output.
+executable = /home/amlinz/16S_best_practices/executables/00uwbc_qualitycontrol.sh
+arguments = $(sample)
+output = 00uwbc_qualitycontrol_$(Cluster).out
+#
+# Specify that HTCondor should transfer files to and from the
+#  computer where each job runs.
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files = /home/amlinz/16S_best_practices/qiime1.tar.gz,/home/amlinz/16S_best_practices/ea-utils.tar.gz
+#transfer_output_files = test.txt
+#
+# Tell HTCondor what amount of compute resources
+#  each job will need on the computer where it runs.
+
+request_cpus = 1
+request_memory = 500MB
+request_disk = 1500KB
+#
+# run from list
+queue sample from uwbc_samples.txt
+
+```
+
+00uwbc_qualitycontrol.sh:
+```{bash, eval = F}
+
+#!/bin/bash
+# Set up programs and copy data from gluster
+tar xvzf ea-utils.tar.gz
+tar xvzf qiime1.tar.gz
+cp /mnt/gluster/amlinz/NTL-MO/UW/$1* .
+gzip -d *.gz
+
+export PATH=$(pwd)/python/bin:$(pwd)/home/bin/:$PATH
+export HOME=$(pwd)/home
+
+# convert fastq to fasta and qual for trimming
+python ./python/bin/convert_fastaqual_fastq.py -f "$1"R1_001.fastq -o . -c fastq_to_fastaqual
+python ./python/bin/convert_fastaqual_fastq.py -f "$1"R2_001.fastq -o . -c fastq_to_fastaqual
+
+# Trim sequences to 200bp (currently 300)
+# This is the recommended length for the reverse reads, forward reads could be trimmed a little less (220)
+# But the target region is 150 bp, so 200bp per read leaves plenty of overlap
+python ./python/bin/truncate_fasta_qual_files.py -f "$1"R1_001.fna -q "$1"R1_001.qual -b 200
+python ./python/bin/truncate_fasta_qual_files.py -f "$1"R2_001.fna -q "$1"R2_001.qual -b 200
+
+# Convert truncated fasta and qual files back to fastq
+python ./python/bin/convert_fastaqual_fastq.py -f "$1"R1_001_filtered.fasta -q "$1"R1_001_filtered.qual -o .
+python ./python/bin/convert_fastaqual_fastq.py -f "$1"R2_001_filtered.fasta -q "$1"R2_001_filtered.qual -o .
+
+# Join the pairs of truncated reads
+python ./python/bin/join_paired_ends.py -f "$1"R1_001_filtered.fastq -r "$1"R2_001_filtered.fastq -o results/
+
+# Quality filter joined reads using the same parameters as the historic EMP dataset
+echo $1 > ID.txt
+ID=$(awk -F "_" '{print $1}' ID.txt)
+python ./python/bin/split_libraries_fastq.py -i results/fastqjoin.join.fastq -o qc_results/ --min_per_read_length_fraction 0.75 --max_bad_run_length 3 --phred_quality_threshold 3 --sequence_max_n 0 --barcode_type 'not-barcoded' --sample_ids $ID --phred_offset 33 --store_qual_scores
+
+# The previous command outputs an .fna file and a .qual file.
+# Convert them to fastq
+# First remove brackets from the qual file output from split_libraries_fastq.py
+# Because for some COMPLETELY MYSTERIOUS REASON, that format is not compatible with convert_fastaqual_fastq.py
+sed 's/[][]//g' qc_results/seqs.qual > temp.qual
+python ./python/bin/convert_fastaqual_fastq.py -f qc_results/seqs.fna -q temp.qual -o .
+
+
+# gzip output, change name of output file to NOT seqs.fna and move back to gluster
+gzip seqs.fastq
+cp seqs.fastq.gz /mnt/gluster/amlinz/NTL-MO/UW-processed/"$1"joined.fastq.gz
+
+# Clean up
+rm *fna
+rm *fasta
+rm *fastq
+rm *tar
+rm *qual
+rm *txt
+rm -r qc_results
+rm -r home
+rm -rf python
+rm -r results
+
+```
+
+2. Trim the sequences
+
+In QIIME2, trimming is automatically bundled with deblurring. However, since we don't want to deblur all versions of this data, I'm doing trimming in a separate step in QIIME1 because it doesn't seem to be available in QIIME2 without deblurring. Each sample and trimming length can run on its own node. 
+
+Input your desired trimming lengths in trim_lengths.txt, one number per line
+
+```{bash, eval = F}
+
+# Make a list of all fastq and trimming length combinations to run
+# Need a list of the EMP samples too
+./scripts/list_EMP_samples.sh
+./scripts/setup_trimming.sh
+
+# Submit trimming scripts - can run concurrently
+condor_submit submits 01trim_uwbc_seqs.sub
+condor_submit submits 02trim_emp_seqs.sub
+
+# Check the results files
+ls -ltrh /mnt/gluster/amlinz/NTL-MO/trimmed_100/
+ls -ltrh /mnt/gluster/amlinz/NTL-MO/trimmed_130/
+
+```
+
+list_EMP_samples.sh:
+```{bash, eval = F}
+#!/bin/bash
+
+for file in /mnt/gluster/amlinz/NTL-MO/EMP/*.fastq.gz; do
+        sample=$(basename $file .fastq.gz);
+        echo $sample;
+        done > emp_samples.txt
+
+```
+
+setup_trimming.sh:
+```{bash, eval = F}
+#!/bin/bash
+
+touch trim_uwbc.txt
+touch trim_emp.txt
+
+while read line; do
+        mkdir /mnt/gluster/amlinz/NTL-MO/trimmed_"$line";
+        while read bit; do
+                echo $bit+$line;
+        done < processed_uwbc_samples.txt >> trim_uwbc.txt
+        while read emp; do
+                echo $emp+$line;
+        done < emp_samples.txt >> trim_emp.txt
+done < trim_lengths.txt
+
+```
+
+01trim_uwbc_seqs.sub:
+```{bash, eval = F}
+# 01trim_uwbc_seqs.sub
+#
+#
+# Specify the HTCondor Universe
+universe = vanilla
+log = 01trim_uwbc_seqs_$(Cluster).log
+error = 01trim_uwbc_seqs_$(Cluster)_$(Process).err
+requirements = (OpSys == "LINUX") && (OpSysMajorVer == 7) && (Target.HasGluster == true)
+#
+# Specify your executable, arguments, and a file for HTCondor to store standard
+#  output.
+executable = /home/amlinz/16S_best_practices/executables/01trim_uwbc_seqs.sh
+arguments = $(sample)
+output = 01trim_uwbc_seqs_$(Cluster).out
+#
+# Specify that HTCondor should transfer files to and from the
+#  computer where each job runs.
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files = /home/amlinz/16S_best_practices/qiime1.tar.gz
+#transfer_output_files =
+#
+# Tell HTCondor what amount of compute resources
+#  each job will need on the computer where it runs.
+
+request_cpus = 1
+request_memory = 200MB
+request_disk = 5MB
+#
+# run from list
+queue sample from trim_uwbc.txt
+
+```
+
+01trim_uwbc_seqs.sh:
+```{bash, eval = F}
+
+#!/bin/bash
+# Set up programs and copy data from gluster
+tar xvzf qiime1.tar.gz
+echo $1 > variables.txt
+sample=$(awk -F'+' '{print $1}' variables.txt)
+trim=$(awk -F'+' '{print $2}' variables.txt)
+cp /mnt/gluster/amlinz/NTL-MO/UW-processed/$sample.fastq.gz .
+gzip -d *.gz
+
+export PATH=$(pwd)/python/bin:$(pwd)/home/bin/:$PATH
+
+echo $1
+echo $sample
+echo $trim
+cat variables.txt
+
+#Convert fastq to fasta qual
+python ./python/bin/convert_fastaqual_fastq.py -f $sample.fastq -o . -c fastq_to_fastaqual
+
+# Trim sequences
+python ./python/bin/truncate_fasta_qual_files.py -f $sample.fna -q $sample.qual -b $trim
+
+
+# Convert truncated fasta and qual files back to fastq
+python ./python/bin/convert_fastaqual_fastq.py -f "$sample"_filtered.fasta -q "$sample"_filtered.qual -o .
+
+# gzip output, change name of output file to NOT seqs.fna and move back to gluster
+gzip "$sample"_filtered.fastq
+cp "$sample"_filtered.fastq.gz /mnt/gluster/amlinz/NTL-MO/trimmed_"$trim"
+
+# Clean up
+rm *fasta
+rm *fastq
+rm *tar
+rm *fna
+rm *qual
+rm -rf python
+rm *gz
+rm *txt
+
+```
+
+02trim_emp_seqs.sub:
+```{bash, eval = F}
+# 02trim_emp_seqs.sub
+#
+#
+# Specify the HTCondor Universe
+universe = vanilla
+log = 02trim_emp_seqs_$(Cluster).log
+error = 02trim_emp_seqs_$(Cluster)_$(Process).err
+requirements = (OpSys == "LINUX") && (OpSysMajorVer == 7) && (Target.HasGluster == true)
+#
+# Specify your executable, arguments, and a file for HTCondor to store standard
+#  output.
+executable = /home/amlinz/16S_best_practices/executables/02trim_emp_seqs.sh
+arguments = $(sample)
+output = 02trim_emp_seqs_$(Cluster).out
+#
+# Specify that HTCondor should transfer files to and from the
+#  computer where each job runs.
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files = /home/amlinz/16S_best_practices/qiime1.tar.gz
+#transfer_output_files =
+#
+# Tell HTCondor what amount of compute resources
+#  each job will need on the computer where it runs.
+
+request_cpus = 1
+request_memory = 200MB
+request_disk = 5MB
+#
+# run from list
+queue sample from trim_emp.txt
+
+```
+
+02trim_emp_seqs.sh:
+```{bash, eval = F}
+#!/bin/bash
+# Set up programs and copy data from gluster
+tar xvzf qiime1.tar.gz
+echo $1 > variables.txt
+sample=$(awk -F'+' '{print $1}' variables.txt)
+trim=$(awk -F'+' '{print $2}' variables.txt)
+cp /mnt/gluster/amlinz/NTL-MO/EMP/$sample.fastq.gz .
+gzip -d *.gz
+
+export PATH=$(pwd)/python/bin:$(pwd)/home/bin/:$PATH
+
+sample2=${sample/./_}
+mv $sample.fastq $sample2.fastq
+
+#Convert fastq to fasta qual
+python ./python/bin/convert_fastaqual_fastq.py -f $sample2.fastq -o . -c fastq_to_fastaqual
+
+# Trim sequences
+python ./python/bin/truncate_fasta_qual_files.py -f $sample2.fna -q $sample2.qual -b $trim
+
+
+# Convert truncated fasta and qual files back to fastq
+python ./python/bin/convert_fastaqual_fastq.py -f "$sample2"_filtered.fasta -q "$sample2"_filtered.qual -o .
+
+# gzip output, change name of output file to NOT seqs.fna and move back to gluster
+gzip "$sample2"_filtered.fastq
+cp "$sample2"_filtered.fastq.gz /mnt/gluster/amlinz/NTL-MO/trimmed_"$trim"
+
+# Clean up
+rm *fasta
+rm *fastq
+rm *tar
+rm *fna
+rm *qual
+rm -rf python
+rm *gz
+rm *txt
+
+```
+
+3. Sequence error correction techniques
+
+We want to test the impacts of deblurring and denoising vs. not doing anything. This process will be done in QIIME2. With help from Sarah Stevens and Christina Koch, I built a Docker image of the QIIME2 install. It is hosted at sstevens/qiime.
+
+Contents of Docker build file:
+```{bash, eval = F}
+FROM continuumio/miniconda3
+
+RUN mkdir /home/qiimeuser
+ENV HOME /home/qiimeuser
+
+RUN conda update conda && \
+    wget https://data.qiime2.org/distro/core/qiime2-2018.2-py35-linux-conda.yml &&\
+    conda env create -n qiime2-2018.2 \
+    --file qiime2-2018.2-py35-linux-conda.yml
+
+COPY run_qiime.sh /tmp
+ENV PATH="/tmp:${PATH}"
+```
+
+Input all combinations of trim lengths and error correction methods you want to test in error_settings.txt, like so:
+trimmed_100+deblur
+trimmed_100+denoise
+trimmed_100+nothing
+trimmed_130+deblur
+trimmed_130+denoise
+trimmed_130+nothing
+
+00error_correction.sh:
+```{bash, eval = F}
+#!/bin/bash
+
+./run_qiime.sh
+
+#Split variables
+echo $1 > variables.txt
+location=$(awk -F'+' '{print $1}' variables.txt)
+method=$(awk -F'+' '{print $2}' variables.txt)
+
+# Copy data
+cp /mnt/gluster/amlinz/NTL-MO/$location .
+
+# Import data as a QIIME artifact
+qiime tools import \
+  --type 'SampleData[SequencesWithQuality]' \
+  --input-path $location \
+  --source-format CasavaOneEightSingleLanePerSampleDirFmt \
+  --output-path $1.qza
+
+rmdir -r $location
+
+
+```
+ 
